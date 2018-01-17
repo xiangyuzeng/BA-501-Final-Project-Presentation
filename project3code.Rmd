@@ -1,0 +1,252 @@
+---
+title: "Untitled"
+author: "Xiangyu Zeng"
+date: "January 15, 2018"
+output: html_document
+---
+
+```{r}
+library(randomForest)
+library(caret)
+library(ROCR)
+library(DMwR)
+library(data.table)
+library(zoo)
+library(e1071)
+library(rpart)
+library(randomForest)
+library(ggplot2)
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+library(ROSE)
+
+
+```
+
+```{r}
+df = fread("creditcard.csv")
+names(df)
+head(df)
+summary(df)
+set.seed(1003)
+```
+
+```{r}
+# Look at distribution
+plot(density(x= df$V1))
+
+#look at relationship with y level
+
+#look at errors
+#find missing values
+sum(is.na(df))
+
+#prepossessing: deal with it later
+#class0: fruad
+#class1:not fruad
+
+#PCA is already done/ find there is no missing values
+#save steps in dealing with data set
+```
+
+```{r}
+#Exploatory data analysis
+ggplot(df, aes(x=V3)) + geom_density(aes(group=Class, colour=Class, fill=Class), alpha=0.3)
+#Boxplot
+boxplot(df$Time~df$Class)
+```
+
+
+```{r}
+#because data is relatively clean, decide to run robust models
+#also need to perform some transformations.
+#Log is not as good as boxcox
+
+#from the plot can see the data is heavity skewed to the left: 
+#decide to perform a box-cox transformation
+
+#### Data pre-processing
+## 'normalize' the data
+transform_columns <- c("V","Amount")
+transformed_column     <- df[ ,grepl(paste(transform_columns, collapse = "|"),names(df)),with = FALSE]
+transformed_column_processed <- predict(preProcess(transformed_column, method = c("BoxCox","scale")),transformed_column)
+```
+
+
+```{r}
+#Create the new dataframe
+df_new <- data.table(cbind(transformed_column_processed,Class = df$Class))
+df_new[,Class:=as.factor(Class)]
+set.seed(1003)
+
+```
+
+
+```{r}
+#### Training and Test dataset
+training_index <- createDataPartition(df_new$Class, p=0.7,list=FALSE)
+training <- df_new[training_index,]
+test<- df_new[-training_index,]
+
+
+```
+
+```{r}
+
+### Logistic regression
+logit <- glm(Class ~ ., data = training, family = "binomial")
+logit_pred <- predict(logit, test, type = "response")
+
+logit_prediction <- prediction(logit_pred,test$Class)
+logit_recall <- performance(logit_prediction,"prec","rec")
+logit_roc <- performance(logit_prediction,"tpr","fpr")
+logit_auc <- performance(logit_prediction,"auc")
+plot(logit_recall,col='red')
+logit_auc
+```
+
+```{R}
+### Random forest (Too long to get the running results)
+#rf.model <- randomForest(Class ~ ., data = training,ntree = 2000, nodesize = 20)
+#rf_pred <- predict(rf.model, test,type="prob")
+
+#rf_prediction <- prediction(rf_pred[,2],test$Class)
+#rf_recall <- performance(rf_prediction,"prec","rec")
+#rf_roc <- performance(rf_prediction,"tpr","fpr")
+#rf_auc <- performance(rf_prediction,"auc")
+#plot(rf_recall, add = TRUE, col = 'blue')
+```
+
+```{r}
+auprc <- function(pr_curve) {
+ x <- as.numeric(unlist(pr_curve@x.values))
+ y <- as.numeric(unlist(pr_curve@y.values))
+ y[is.nan(y)] <- 1
+ id <- order(x)
+ result <- sum(diff(x[id])*rollmean(y[id],2))
+ return(result)
+}
+
+#bagging tree
+auprc_results <- data.frame(logit=auprc(logit_recall)
+                            , rf = auprc(rf_recall)
+                            , tb = auprc(tb_recall))
+
+ctrl <- trainControl(method = "cv", number = 10)
+
+tb_model <- train(Class ~ ., data = train_smote, method = "treebag",
+                 trControl = ctrl)
+
+tb_pred <- predict(tb_model$finalModel, test, type = "prob")
+
+tb_prediction <- prediction(tb_pred[,2],test$Class)
+tb_recall <- performance(logit_prediction,"prec","rec")
+tb_roc <- performance(logit_prediction,"tpr","fpr")
+tb_auc <- performance(logit_prediction,"auc")
+plot(tb_recall, add = TRUE, col = 'green')
+
+```
+
+```{r}
+
+## naive Bayes
+df$Class <- factor(df$Class, levels = c("1", "0"))
+set.seed(1234)
+dataSplit <- sample(2, nrow(df), replace = TRUE, prob = c(0.7, 0.3))
+trainSplit<- df[dataSplit==1,]
+testSplit <- df[dataSplit==2,]
+
+library(e1071)
+# create a simple naive bayes model
+nb.model <- naiveBayes(Class ~ ., data = trainSplit)
+
+# make predictions - test data
+nb.pred <- predict(nb.model, testSplit, type = "class")
+
+# create a naive bayes confusion matrix
+table(nb.pred, testSplit$Class)
+
+# performance metrics
+confusionMatrix(nb.pred, testSplit$Class)
+```
+
+```{r}
+# data balancing
+# used SMOTE to generate additional new positive class observations and attained an almost
+# equal split -  1968 (47%) and otherwise 2214 (53%)
+# I chose k=5, but I think there are better approaches to chosing k 
+# so that the model does not overfit during learning
+
+set.seed(1234)
+new.data <- SMOTE(Class ~ ., df, perc.over = 300, perc.under=150, k = 5)
+table(new.data$Class)
+prop.table(table(new.data$Class))
+
+# randomly split the data
+set.seed(1234)
+bal <- sample(2, nrow(new.data), replace = TRUE, prob = c(0.8, 0.2))
+bal.train <- new.data[bal==1,]
+bal.test <- new.data[bal==2,]
+
+# retained almost similar split prob in both test/train sets as the original data
+dim(bal.train)
+dim(bal.test)
+prop.table(table(bal.train$Class))
+prop.table(table(bal.test$Class))
+```
+
+
+```{R}
+# decision tree
+
+# fit the tree on balanced training set and validate with test
+# I also use 10-fold cross validation to compare results
+
+# Base Accuracy 93.4%
+# AUC ROC Curve = 93.5%
+# 10-fold Cross Validation Accuracy = 94.5%
+
+set.seed(529)
+bal.tree <- rpart(Class ~ ., data = bal.train)
+# summary
+summary(bal.tree)
+
+# model performance on test data - class
+pred.tree <- predict(bal.tree, bal.test, type = "class") 
+
+# performance metrics
+confusionMatrix(pred.tree, bal.test$Class)
+fancyRpartPlot(bal.tree)
+# variable importance
+bal.tree$variable.importance
+
+# from package ROSE we get precision/recall and f-measure
+accuracy.meas(pred.tree, bal.test$Class)
+roc.curve(pred.tree, bal.test$Class, plotit = T)
+
+# 10-fold cross validation 
+set.seed(529)
+t.control <- trainControl(method = "cv", number = 10, savePredictions = TRUE)
+cv.tree <- train(Class ~ ., data = new.data, trControl = t.control, method = "rpart", tuneLength=5)
+cv.tree.pred <- predict(cv.tree, new.data)
+# confusion matrix
+confusionMatrix(cv.tree.pred, new.data$Class)
+
+```
+
+```{r}
+# Random forest
+
+set.seed(1234)
+model.rf <- randomForest(Class ~ ., data = bal.train, ntree = 1000, importance = TRUE)
+pred.rf <- predict(model.rf, bal.test, type = "class")
+# confusion matrix
+confusionMatrix(table(pred.rf, bal.test$Class))
+# variable importance
+varImp(model.rf)
+
+# from package ROSE we get precision/recall and f-measure
+accuracy.meas(pred.rf, bal.test$Class)
+roc.curve(pred.rf, bal.test$Class, plotit = T)
+```
